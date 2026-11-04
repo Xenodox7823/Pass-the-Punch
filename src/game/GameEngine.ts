@@ -397,9 +397,6 @@ export class GameEngine {
           input.jump = false;
 
           if (!isCountdown && input.punch && !player.isEliminated && !player.isGhost && player.respawnTimer <= 0) {
-            if (rawX === 0 && rawZ === 0 && input.cameraYaw !== undefined) {
-              player.rotationY = input.cameraYaw;
-            }
             startPunch(player);
             input.punch = false;
           }

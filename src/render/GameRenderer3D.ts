@@ -98,12 +98,14 @@ export class GameRenderer3D {
       powerPreference: 'high-performance',
     });
     this.renderer.setSize(width, height);
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+    // The arena has many animated meshes. Rendering at native 2x DPR and
+    // updating shadow maps every frame is disproportionately expensive on laptops.
+    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.5));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.2;
-    this.renderer.shadowMap.enabled = !this.isSoftwareGl;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // Prefer consistent frame pacing over expensive real-time character shadows.
+    this.renderer.shadowMap.enabled = false;
 
     container.appendChild(this.renderer.domElement);
 
@@ -145,7 +147,7 @@ export class GameRenderer3D {
     const dirLight = new THREE.DirectionalLight(0xfff7ed, 1.5);
     dirLight.position.set(20, 45, 25);
     if (!this.isSoftwareGl) {
-      dirLight.castShadow = true;
+      dirLight.castShadow = false;
       dirLight.shadow.mapSize.width = 2048;
       dirLight.shadow.mapSize.height = 2048;
       dirLight.shadow.camera.near = 2;

@@ -395,6 +395,8 @@ export function App() {
       const renderer3D = new GameRenderer3D(viewportRef.current, engineRef.current);
       renderer3D.setCameraMode(cameraMode);
       renderer3D.targetPlayerId = myPlayerId;
+      const localPlayer = engineRef.current.players.find((player) => player.id === myPlayerId);
+      if (localPlayer) renderer3D.cameraYaw = localPlayer.rotationY;
       renderer3DRef.current = renderer3D;
 
       let animId: number;

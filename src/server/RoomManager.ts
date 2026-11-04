@@ -183,15 +183,15 @@ export class GameRoom {
       }
     });
 
-    // Keep authoritative physics at 60 Hz; send state at 20 Hz to reduce
-    // serialization and network overhead. Clients interpolate between updates.
-    const tickRate = 60;
+    // A 40 Hz authoritative step reduces CPU load on small free instances.
+    // Keep the 20 Hz snapshot cadence so clients can interpolate smoothly.
+    const tickRate = 40;
     const dt = 1 / tickRate;
     let tick = 0;
     this.simulationTimer = setInterval(() => {
       if (this.engine) {
         tick += 1;
-        this.engine.step(dt, tick % 3 === 0);
+        this.engine.step(dt, tick % 2 === 0);
       }
     }, 1000 / tickRate);
 

@@ -199,21 +199,21 @@ export const GameHUD: React.FC<GameHUDProps> = ({
       {/* =========================================================================
           ANNOUNCER POPUP MESSAGES
          ========================================================================= */}
-      <div className="absolute top-16 md:top-20 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 pointer-events-none z-30 max-w-[90vw]">
-        {snapshot.messages.map((msg) => (
+      <div className="absolute top-14 md:top-16 left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-none z-30 w-[min(84vw,22rem)]">
+        {snapshot.messages.slice(-1).map((msg) => (
           <div
             key={msg.id}
-            className="px-4 md:px-6 py-2 rounded-2xl bg-slate-950/95 border-2 shadow-2xl text-center transform transition-all animate-bounce"
+            className="w-full px-3 py-1.5 rounded-xl bg-slate-950/75 border shadow-lg text-center transition-opacity animate-in fade-in duration-150 backdrop-blur-sm"
             style={{ borderColor: msg.color }}
           >
             <div
-              className="text-base md:text-xl font-black font-['Fredoka'] tracking-wide"
+              className="text-sm md:text-base font-black font-['Fredoka'] tracking-wide truncate"
               style={{ color: msg.color }}
             >
               {msg.text}
             </div>
             {msg.subtitle && (
-              <div className="text-[11px] md:text-xs font-bold text-slate-300 mt-0.5">
+              <div className="text-[10px] md:text-[11px] font-medium text-slate-300 truncate">
                 {msg.subtitle}
               </div>
             )}
