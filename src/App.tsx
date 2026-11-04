@@ -70,6 +70,7 @@ export function App() {
   const renderer3DRef = useRef<GameRenderer3D | null>(null);
   const inputManagerRef = useRef<InputManager | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const onlineSnapshotsRef = useRef<Array<{ receivedAt: number; snapshot: GameSnapshot }>>([]);
   const pointerDragRef = useRef<{ isDragging: boolean; lastX: number; lastY: number; moved: boolean }>({
     isDragging: false,
     lastX: 0,
@@ -100,8 +101,10 @@ export function App() {
         return;
       }
 
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}`;
+      const configuredServer = import.meta.env.VITE_GAME_SERVER_URL?.trim();
+      const wsUrl = configuredServer
+        ? configuredServer.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:').replace(/\/$/, '')
+        : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
@@ -160,6 +163,9 @@ export function App() {
 
       case 'GAME_SNAPSHOT': {
         const snap = msg.snapshot as GameSnapshot;
+        const snapshots = onlineSnapshotsRef.current;
+        snapshots.push({ receivedAt: performance.now(), snapshot: snap });
+        if (snapshots.length > 8) snapshots.splice(0, snapshots.length - 8);
         setSnapshot(snap);
         processSnapshotAnnouncements(snap);
 
@@ -246,6 +252,7 @@ export function App() {
     // Create client display engine
     const engine = new GameEngine(currentRoom.settings);
     engineRef.current = engine;
+    onlineSnapshotsRef.current = [];
 
     const inputMgr = new InputManager(
       engine,
@@ -392,6 +399,28 @@ export function App() {
         lastTime = time;
 
         if (renderer3DRef.current) {
+          if (isOnline && engineRef.current) {
+            const buffer = onlineSnapshotsRef.current;
+            const renderAt = performance.now() - 100;
+            while (buffer.length > 2 && buffer[1].receivedAt <= renderAt) buffer.shift();
+            if (buffer.length >= 2) {
+              const first = buffer[0];
+              const second = buffer[1];
+              const span = Math.max(1, second.receivedAt - first.receivedAt);
+              const alpha = Math.max(0, Math.min(1, (renderAt - first.receivedAt) / span));
+              const previousPlayers = new Map(first.snapshot.players.map((player) => [player.id, player]));
+              engineRef.current.players = second.snapshot.players;
+              for (const player of engineRef.current.players) {
+                const previous = previousPlayers.get(player.id);
+                if (!previous) continue;
+                player.x = previous.x + (player.x - previous.x) * alpha;
+                player.y = previous.y + (player.y - previous.y) * alpha;
+                player.z = previous.z + (player.z - previous.z) * alpha;
+                const angleDelta = Math.atan2(Math.sin(player.rotationY - previous.rotationY), Math.cos(player.rotationY - previous.rotationY));
+                player.rotationY = previous.rotationY + angleDelta * alpha;
+              }
+            }
+          }
           renderer3DRef.current.targetPlayerId = myPlayerId;
           renderer3DRef.current.render(dt);
 
@@ -413,7 +442,7 @@ export function App() {
         }
       };
     }
-  }, [screen, myPlayerId, cameraMode]);
+  }, [screen, myPlayerId, cameraMode, isOnline]);
 
   const handleCameraModeChange = (mode: CameraViewMode) => {
     setCameraMode(mode);

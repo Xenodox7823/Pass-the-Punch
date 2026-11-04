@@ -183,12 +183,15 @@ export class GameRoom {
       }
     });
 
-    // 30 Hz server simulation tick rate
-    const tickRate = 30;
+    // Keep authoritative physics at 60 Hz; send state at 20 Hz to reduce
+    // serialization and network overhead. Clients interpolate between updates.
+    const tickRate = 60;
     const dt = 1 / tickRate;
+    let tick = 0;
     this.simulationTimer = setInterval(() => {
       if (this.engine) {
-        this.engine.step(dt);
+        tick += 1;
+        this.engine.step(dt, tick % 3 === 0);
       }
     }, 1000 / tickRate);
 

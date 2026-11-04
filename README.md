@@ -24,3 +24,5 @@ Open the address printed by the server (by default, `http://localhost:3000`). No
 - `npm run lint` — type-check the project
 
 Review [SECURITY.md](SECURITY.md) for vulnerability reporting and runtime security requirements. This project is available under the MIT License; see [LICENCE.md](LICENCE.md).
+
+To play online with friends without renting a server or buying a domain, follow the [free hosting guide](HOSTING.md).

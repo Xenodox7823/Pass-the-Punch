@@ -223,11 +223,11 @@ export class GameEngine {
     }
   }
 
-  public step(dt: number) {
+  public step(dt: number, emitSnapshot: boolean = true) {
     if (!this.isPaused) {
       this.fixedUpdate(dt);
     }
-    this.emitSnapshot();
+    if (emitSnapshot) this.emitSnapshot();
   }
 
   public setPaused(paused: boolean) {
