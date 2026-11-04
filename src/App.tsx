@@ -71,6 +71,7 @@ export function App() {
   const inputManagerRef = useRef<InputManager | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const onlineSnapshotsRef = useRef<Array<{ receivedAt: number; snapshot: GameSnapshot }>>([]);
+  const lastHudSnapshotAtRef = useRef(0);
   const pointerDragRef = useRef<{ isDragging: boolean; lastX: number; lastY: number; moved: boolean }>({
     isDragging: false,
     lastX: 0,
@@ -166,7 +167,11 @@ export function App() {
         const snapshots = onlineSnapshotsRef.current;
         snapshots.push({ receivedAt: performance.now(), snapshot: snap });
         if (snapshots.length > 8) snapshots.splice(0, snapshots.length - 8);
-        setSnapshot(snap);
+        const now = performance.now();
+        if (lastHudSnapshotAtRef.current === 0 || snap.phase === 'FINISHED' || now - lastHudSnapshotAtRef.current >= 100) {
+          setSnapshot(snap);
+          lastHudSnapshotAtRef.current = now;
+        }
         processSnapshotAnnouncements(snap);
 
         // Sync authoritative positions to client display engine for 3D rendering
@@ -245,6 +250,7 @@ export function App() {
     cleanupMatch();
 
     setSnapshot(null);
+    lastHudSnapshotAtRef.current = 0;
     setScreen('PLAYING');
     setIsPaused(false);
     setSelectedGhostAbility(null);
@@ -406,19 +412,35 @@ export function App() {
             if (buffer.length >= 2) {
               const first = buffer[0];
               const second = buffer[1];
+              const latest = buffer[buffer.length - 1];
               const span = Math.max(1, second.receivedAt - first.receivedAt);
               const alpha = Math.max(0, Math.min(1, (renderAt - first.receivedAt) / span));
               const previousPlayers = new Map(first.snapshot.players.map((player) => [player.id, player]));
-              engineRef.current.players = second.snapshot.players;
-              for (const player of engineRef.current.players) {
+              const latestPlayers = new Map(latest.snapshot.players.map((player) => [player.id, player]));
+              engineRef.current.players = second.snapshot.players.map((source) => {
+                const player = { ...source, stats: source.stats };
                 const previous = previousPlayers.get(player.id);
-                if (!previous) continue;
-                player.x = previous.x + (player.x - previous.x) * alpha;
-                player.y = previous.y + (player.y - previous.y) * alpha;
-                player.z = previous.z + (player.z - previous.z) * alpha;
-                const angleDelta = Math.atan2(Math.sin(player.rotationY - previous.rotationY), Math.cos(player.rotationY - previous.rotationY));
-                player.rotationY = previous.rotationY + angleDelta * alpha;
-              }
+                if (previous) {
+                  player.x = previous.x + (source.x - previous.x) * alpha;
+                  player.y = previous.y + (source.y - previous.y) * alpha;
+                  player.z = previous.z + (source.z - previous.z) * alpha;
+                  const angleDelta = Math.atan2(Math.sin(source.rotationY - previous.rotationY), Math.cos(source.rotationY - previous.rotationY));
+                  player.rotationY = previous.rotationY + angleDelta * alpha;
+                }
+
+                // Predict only the local player's short movement between snapshots
+                // to avoid visible 20 Hz stepping while retaining server authority.
+                if (player.id === myPlayerId) {
+                  const authoritative = latestPlayers.get(player.id);
+                  const age = Math.min(0.075, Math.max(0, (performance.now() - latest.receivedAt) / 1000));
+                  if (authoritative) {
+                    player.x = authoritative.x + authoritative.vx * age;
+                    player.y = authoritative.y + authoritative.vy * age;
+                    player.z = authoritative.z + authoritative.vz * age;
+                  }
+                }
+                return player;
+              });
             }
           }
           renderer3DRef.current.targetPlayerId = myPlayerId;

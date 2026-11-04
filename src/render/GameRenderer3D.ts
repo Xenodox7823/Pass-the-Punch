@@ -96,7 +96,6 @@ export class GameRenderer3D {
     this.renderer = new THREE.WebGLRenderer({
       antialias: !this.isSoftwareGl,
       powerPreference: 'high-performance',
-      preserveDrawingBuffer: true,
     });
     this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
