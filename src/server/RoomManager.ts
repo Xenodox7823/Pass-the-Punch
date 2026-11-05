@@ -35,6 +35,7 @@ export class GameRoom {
   private simulationTimer: NodeJS.Timeout | null = null;
   private lastLoopAt = 0;
   private accumulatorMs = 0;
+  private snapshotAccumulatorMs = 0;
   private tickDurationTotalMs = 0;
   private tickDurationMaxMs = 0;
   private tickOverruns = 0;
@@ -200,6 +201,7 @@ export class GameRoom {
     const stepMs = 1000 / tickRate;
     this.lastLoopAt = performance.now();
     this.accumulatorMs = 0;
+    this.snapshotAccumulatorMs = 0;
     this.simulationTimer = setInterval(() => {
       const now = performance.now();
       this.accumulatorMs += now - this.lastLoopAt;
@@ -208,7 +210,11 @@ export class GameRoom {
       while (this.engine && this.accumulatorMs >= stepMs && catchupSteps < 4) {
         const tickStartedAt = performance.now();
         this.simulationTick += 1;
-        this.engine.step(stepMs / 1000, this.simulationTick % 2 === 0);
+        this.snapshotAccumulatorMs += stepMs;
+        const snapshotIntervalMs = 1000 / 30;
+        const emitSnapshot = this.snapshotAccumulatorMs >= snapshotIntervalMs;
+        if (emitSnapshot) this.snapshotAccumulatorMs -= snapshotIntervalMs;
+        this.engine.step(stepMs / 1000, emitSnapshot);
         const tickDuration = performance.now() - tickStartedAt;
         this.measuredTicks += 1;
         this.tickDurationTotalMs += tickDuration;

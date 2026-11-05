@@ -62,7 +62,7 @@ export function App() {
   const [cameraMode, setCameraMode] = useState<CameraViewMode>('THIRD_PERSON');
   const [selectedGhostAbility, setSelectedGhostAbility] = useState<GhostAbilityType | null>(null);
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null);
-  const [networkStats, setNetworkStats] = useState({ rttMs: 0, jitterMs: 0, snapshotMs: 0, gaps: 0, bufferedBytes: 0, inputAck: 0, interpolationMs: 80 });
+  const [networkStats, setNetworkStats] = useState({ rttMs: 0, jitterMs: 0, snapshotMs: 0, gaps: 0, bufferedBytes: 0, inputAck: 0, interpolationMs: 60 });
 
   const lastPhaseRef = useRef<string | null>(null);
   const meEliminatedRef = useRef<boolean>(false);
@@ -83,11 +83,12 @@ export function App() {
   const inputHistoryRef = useRef<Array<{ sequence: number; sentAt: number; input: PlayerInputPacket }>>([]);
   const acknowledgedInputRef = useRef<{ sequence: number; input: PlayerInputPacket } | null>(null);
   const serverClockOffsetRef = useRef<number | null>(null);
-  const snapshotIntervalEwmaRef = useRef(50);
+  const snapshotIntervalEwmaRef = useRef(1000 / 30);
   const snapshotJitterEwmaRef = useRef(0);
-  const interpolationDelayRef = useRef(80);
-  const lastPredictedLocalRef = useRef<{ sequence: number; x: number; y: number; z: number } | null>(null);
+  const interpolationDelayRef = useRef(60);
+  const lastPredictedLocalRef = useRef<{ sequence: number; state: GameSnapshot['players'][number] } | null>(null);
   const localCorrectionRef = useRef({ x: 0, y: 0, z: 0 });
+  const localJumpPredictedRef = useRef(false);
   const pointerDragRef = useRef<{ isDragging: boolean; lastX: number; lastY: number; moved: boolean }>({
     isDragging: false,
     lastX: 0,
@@ -203,7 +204,7 @@ export function App() {
           const intervalError = Math.abs(snapshotMs - snapshotIntervalEwmaRef.current);
           snapshotJitterEwmaRef.current = snapshotJitterEwmaRef.current * 0.8 + intervalError * 0.2;
           snapshotIntervalEwmaRef.current = snapshotIntervalEwmaRef.current * 0.8 + snapshotMs * 0.2;
-          const targetDelay = Math.max(60, Math.min(150, 60 + snapshotJitterEwmaRef.current * 2));
+          const targetDelay = Math.max(50, Math.min(150, 50 + snapshotJitterEwmaRef.current * 2));
           interpolationDelayRef.current += (targetDelay - interpolationDelayRef.current) * 0.15;
           setNetworkStats((stats) => ({ ...stats, interpolationMs: Math.round(interpolationDelayRef.current) }));
         }
@@ -367,6 +368,7 @@ export function App() {
     lastSnapshotReceivedAtRef.current = 0;
     lastPredictedLocalRef.current = null;
     localCorrectionRef.current = { x: 0, y: 0, z: 0 };
+    localJumpPredictedRef.current = false;
 
     const inputMgr = new InputManager(
       engine,
@@ -542,70 +544,88 @@ export function App() {
                 if (player.id === myPlayerId) {
                   const authoritative = latestPlayers.get(player.id);
                   if (authoritative) {
-                    const predicted = { ...authoritative, stats: { ...authoritative.stats } };
                     const now = performance.now();
-                    const snapshotClientTime = latest.serverTime && serverClockOffsetRef.current !== null
-                      ? latest.serverTime - serverClockOffsetRef.current
-                      : latest.receivedAt - rttRef.current / 2;
-                    const replayStart = Math.min(now, snapshotClientTime);
-                    const replayEnd = Math.max(replayStart, now);
-                    const age = Math.min(0.18, Math.max(0, (replayEnd - replayStart) / 1000));
                     const countdown = latest.snapshot.countdownTimer > 0;
-                    const inputAck = latest.inputAcks[String(myPlayerId)] ?? 0;
                     const previousPrediction = lastPredictedLocalRef.current;
-                    if (previousPrediction && previousPrediction.sequence !== latest.sequence) {
-                      const dx = previousPrediction.x - authoritative.x;
-                      const dy = previousPrediction.y - authoritative.y;
-                      const dz = previousPrediction.z - authoritative.z;
-                      const error = Math.hypot(dx, dy, dz);
-                      const correctionScale = error > 1.5 ? 0 : 1;
-                      localCorrectionRef.current = { x: dx * correctionScale, y: dy * correctionScale, z: dz * correctionScale };
-                    }
+                    const newSnapshot = !previousPrediction || previousPrediction.sequence !== latest.sequence;
+                    let predicted = newSnapshot
+                      ? { ...authoritative, stats: { ...authoritative.stats } }
+                      : { ...previousPrediction.state, stats: { ...previousPrediction.state.stats } };
                     const acknowledged = acknowledgedInputRef.current;
-                    let activeInput: PlayerInputPacket = acknowledged && acknowledged.sequence <= inputAck
+                    const inputAck = latest.inputAcks[String(myPlayerId)] ?? 0;
+                    let replayInput: PlayerInputPacket = acknowledged && acknowledged.sequence <= inputAck
                       ? acknowledged.input
                       : { forward: false, backward: false, left: false, right: false, jump: false, punch: false, dodge: false, cameraYaw: 0 };
-                    const pendingInputs = inputHistoryRef.current
-                      .filter((entry) => entry.sequence > inputAck && entry.sentAt <= replayEnd)
-                      .sort((a, b) => a.sentAt - b.sentAt || a.sequence - b.sequence);
-                    let cursor = replayStart;
-                    let jumpPending = false;
-                    const simulateUntil = (until: number) => {
-                      let remaining = Math.max(0, until - cursor);
-                      let firstStep = true;
-                      while (remaining > 0) {
-                        const step = Math.min(1000 / 60, remaining) / 1000;
-                        let rawX = (activeInput.right ? 1 : 0) - (activeInput.left ? 1 : 0) + (activeInput.analogX ?? 0);
-                        let rawZ = (activeInput.forward ? 1 : 0) - (activeInput.backward ? 1 : 0) + (activeInput.analogY ?? 0);
-                        rawX = Math.max(-1, Math.min(1, rawX));
-                        rawZ = Math.max(-1, Math.min(1, rawZ));
-                        const yaw = activeInput.cameraYaw || 0;
-                        const moveX = countdown ? 0 : -rawX * Math.cos(yaw) + rawZ * Math.sin(yaw);
-                        const moveZ = countdown ? 0 : rawX * Math.sin(yaw) + rawZ * Math.cos(yaw);
-                        updatePlayerPhysics(
-                          predicted,
-                          step,
-                          moveX,
-                          moveZ,
-                          !countdown && firstStep && jumpPending,
-                          latest.snapshot.ghostZones ?? [],
-                          latest.snapshot.safeRadius
-                        );
-                        if (firstStep) jumpPending = false;
-                        firstStep = false;
-                        const elapsedMs = step * 1000;
-                        remaining -= elapsedMs;
-                        cursor += elapsedMs;
+
+                    if (newSnapshot) {
+                      const snapshotClientTime = latest.serverTime && serverClockOffsetRef.current !== null
+                        ? latest.serverTime - serverClockOffsetRef.current
+                        : latest.receivedAt - rttRef.current / 2;
+                      const replayStart = Math.min(now, snapshotClientTime);
+                      const replayEnd = Math.max(replayStart, now);
+                      const pendingInputs = inputHistoryRef.current
+                        .filter((entry) => entry.sequence > inputAck && entry.sentAt <= replayEnd)
+                        .sort((a, b) => a.sentAt - b.sentAt || a.sequence - b.sequence);
+                      let cursor = replayStart;
+                      let jumpPending = false;
+                      const simulateUntil = (until: number) => {
+                        let remaining = Math.max(0, until - cursor);
+                        let firstStep = true;
+                        while (remaining > 0) {
+                          const stepMs = Math.min(1000 / 60, remaining);
+                          const step = stepMs / 1000;
+                          let rawX = (replayInput.right ? 1 : 0) - (replayInput.left ? 1 : 0) + (replayInput.analogX ?? 0);
+                          let rawZ = (replayInput.forward ? 1 : 0) - (replayInput.backward ? 1 : 0) + (replayInput.analogY ?? 0);
+                          rawX = Math.max(-1, Math.min(1, rawX));
+                          rawZ = Math.max(-1, Math.min(1, rawZ));
+                          const yaw = replayInput.cameraYaw || 0;
+                          const moveX = countdown ? 0 : -rawX * Math.cos(yaw) + rawZ * Math.sin(yaw);
+                          const moveZ = countdown ? 0 : rawX * Math.sin(yaw) + rawZ * Math.cos(yaw);
+                          updatePlayerPhysics(predicted, step, moveX, moveZ, !countdown && firstStep && jumpPending, latest.snapshot.ghostZones ?? [], latest.snapshot.safeRadius);
+                          if (firstStep) jumpPending = false;
+                          firstStep = false;
+                          remaining -= stepMs;
+                          cursor += stepMs;
+                        }
+                        cursor = until;
+                      };
+                      for (const entry of pendingInputs) {
+                        const eventTime = Math.max(replayStart, entry.sentAt);
+                        simulateUntil(Math.min(replayEnd, eventTime));
+                        if (!replayInput.jump && entry.input.jump) jumpPending = true;
+                        replayInput = entry.input;
                       }
-                      cursor = until;
-                    };
-                    for (const entry of pendingInputs) {
-                      const eventTime = Math.max(replayStart, entry.sentAt);
-                      simulateUntil(Math.min(replayEnd, eventTime));
-                      if (!activeInput.jump && entry.input.jump) jumpPending = true;
-                      activeInput = entry.input;
+                      simulateUntil(replayEnd);
+
+                      if (previousPrediction) {
+                        const dx = previousPrediction.state.x - predicted.x;
+                        const dy = previousPrediction.state.y - predicted.y;
+                        const dz = previousPrediction.state.z - predicted.z;
+                        const error = Math.hypot(dx, dy, dz);
+                        const correctionScale = error > 1.5 ? 0 : 1;
+                        localCorrectionRef.current = { x: dx * correctionScale, y: dy * correctionScale, z: dz * correctionScale };
+                      }
+                      localJumpPredictedRef.current = replayInput.jump;
+                    } else {
+                      const input = inputManagerRef.current?.currentPacket ?? replayInput;
+                      let rawX = (input.right ? 1 : 0) - (input.left ? 1 : 0) + (input.analogX ?? 0);
+                      let rawZ = (input.forward ? 1 : 0) - (input.backward ? 1 : 0) + (input.analogY ?? 0);
+                      rawX = Math.max(-1, Math.min(1, rawX));
+                      rawZ = Math.max(-1, Math.min(1, rawZ));
+                      const yaw = input.cameraYaw || 0;
+                      const moveX = countdown ? 0 : -rawX * Math.cos(yaw) + rawZ * Math.sin(yaw);
+                      const moveZ = countdown ? 0 : rawX * Math.sin(yaw) + rawZ * Math.cos(yaw);
+                      let remaining = Math.min(0.1, dt);
+                      let firstStep = true;
+                      const jumpPressed = input.jump && !localJumpPredictedRef.current;
+                      localJumpPredictedRef.current = input.jump;
+                      while (remaining > 0) {
+                        const step = Math.min(1 / 60, remaining);
+                        updatePlayerPhysics(predicted, step, moveX, moveZ, !countdown && firstStep && jumpPressed, latest.snapshot.ghostZones ?? [], latest.snapshot.safeRadius);
+                        firstStep = false;
+                        remaining -= step;
+                      }
                     }
-                    simulateUntil(replayEnd);
                     const correctionDecay = Math.exp(-12 * dt);
                     localCorrectionRef.current.x *= correctionDecay;
                     localCorrectionRef.current.y *= correctionDecay;
@@ -613,7 +633,7 @@ export function App() {
                     predicted.x += localCorrectionRef.current.x;
                     predicted.y += localCorrectionRef.current.y;
                     predicted.z += localCorrectionRef.current.z;
-                    lastPredictedLocalRef.current = { sequence: latest.sequence, x: predicted.x, y: predicted.y, z: predicted.z };
+                    lastPredictedLocalRef.current = { sequence: latest.sequence, state: predicted };
                     player.x = predicted.x;
                     player.y = predicted.y;
                     player.z = predicted.z;
