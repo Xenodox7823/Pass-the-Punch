@@ -230,6 +230,10 @@ export class GameEngine {
     if (emitSnapshot) this.emitSnapshot();
   }
 
+  public emitCurrentSnapshot() {
+    this.emitSnapshot();
+  }
+
   public setPaused(paused: boolean) {
     this.isPaused = paused;
     if (!paused) {

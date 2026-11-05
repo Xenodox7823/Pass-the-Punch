@@ -40,6 +40,8 @@ export class GameRoom {
   private tickDurationMaxMs = 0;
   private tickOverruns = 0;
   private measuredTicks = 0;
+  private maxSimulationBacklogMs = 0;
+  private saturatedLoopBatches = 0;
   private snapshotBytesTotal = 0;
   private snapshotSerializationTotalMs = 0;
   private snapshotSamples = 0;
@@ -179,6 +181,7 @@ export class GameRoom {
 
   public startMatch() {
     this.status = 'PLAYING';
+    this.inputSequences.clear();
 
     const humanClients = Array.from(this.clients.values()).filter((c) => !c.isDisconnected);
     // Sort humans by playerId
@@ -206,15 +209,19 @@ export class GameRoom {
       const now = performance.now();
       this.accumulatorMs += now - this.lastLoopAt;
       this.lastLoopAt = now;
+      this.maxSimulationBacklogMs = Math.max(this.maxSimulationBacklogMs, this.accumulatorMs);
       let catchupSteps = 0;
+      let publishLatestSnapshot = false;
       while (this.engine && this.accumulatorMs >= stepMs && catchupSteps < 4) {
         const tickStartedAt = performance.now();
         this.simulationTick += 1;
         this.snapshotAccumulatorMs += stepMs;
         const snapshotIntervalMs = 1000 / 30;
-        const emitSnapshot = this.snapshotAccumulatorMs >= snapshotIntervalMs;
-        if (emitSnapshot) this.snapshotAccumulatorMs -= snapshotIntervalMs;
-        this.engine.step(stepMs / 1000, emitSnapshot);
+        while (this.snapshotAccumulatorMs >= snapshotIntervalMs) {
+          this.snapshotAccumulatorMs -= snapshotIntervalMs;
+          publishLatestSnapshot = true;
+        }
+        this.engine.step(stepMs / 1000, false);
         const tickDuration = performance.now() - tickStartedAt;
         this.measuredTicks += 1;
         this.tickDurationTotalMs += tickDuration;
@@ -223,6 +230,8 @@ export class GameRoom {
         this.accumulatorMs -= stepMs;
         catchupSteps += 1;
       }
+      if (catchupSteps === 4 && this.accumulatorMs >= stepMs) this.saturatedLoopBatches += 1;
+      if (publishLatestSnapshot && this.engine) this.engine.emitCurrentSnapshot();
     }, 4);
 
     this.broadcast({
@@ -301,13 +310,15 @@ export class GameRoom {
       }
     }
     if (this.simulationTick % 400 === 0) {
-      console.info(`[net] room=${this.code} tick=${this.simulationTick} snapshot=${this.snapshotSequence} avgTickMs=${(this.tickDurationTotalMs / Math.max(1, this.measuredTicks)).toFixed(2)} maxTickMs=${this.tickDurationMaxMs.toFixed(2)} overruns=${this.tickOverruns} avgSnapshotBytes=${Math.round(this.snapshotBytesTotal / Math.max(1, this.snapshotSamples))} avgSerializeMs=${(this.snapshotSerializationTotalMs / Math.max(1, this.snapshotSamples)).toFixed(2)} maxBuffered=${this.maxBufferedAmount} skipped=${this.skippedSnapshots}`);
+      console.info(`[net] room=${this.code} tick=${this.simulationTick} snapshot=${this.snapshotSequence} avgTickMs=${(this.tickDurationTotalMs / Math.max(1, this.measuredTicks)).toFixed(2)} maxTickMs=${this.tickDurationMaxMs.toFixed(2)} overruns=${this.tickOverruns} maxBacklogMs=${this.maxSimulationBacklogMs.toFixed(1)} saturatedLoops=${this.saturatedLoopBatches} avgSnapshotBytes=${Math.round(this.snapshotBytesTotal / Math.max(1, this.snapshotSamples))} avgSerializeMs=${(this.snapshotSerializationTotalMs / Math.max(1, this.snapshotSamples)).toFixed(2)} maxBuffered=${this.maxBufferedAmount} skipped=${this.skippedSnapshots}`);
       this.maxBufferedAmount = 0;
       this.skippedSnapshots = 0;
       this.tickDurationTotalMs = 0;
       this.tickDurationMaxMs = 0;
       this.tickOverruns = 0;
       this.measuredTicks = 0;
+      this.maxSimulationBacklogMs = 0;
+      this.saturatedLoopBatches = 0;
       this.snapshotBytesTotal = 0;
       this.snapshotSerializationTotalMs = 0;
       this.snapshotSamples = 0;

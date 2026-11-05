@@ -62,7 +62,7 @@ export function App() {
   const [cameraMode, setCameraMode] = useState<CameraViewMode>('THIRD_PERSON');
   const [selectedGhostAbility, setSelectedGhostAbility] = useState<GhostAbilityType | null>(null);
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null);
-  const [networkStats, setNetworkStats] = useState({ rttMs: 0, jitterMs: 0, snapshotMs: 0, gaps: 0, bufferedBytes: 0, inputAck: 0, interpolationMs: 60 });
+  const [networkStats, setNetworkStats] = useState({ rttMs: 0, jitterMs: 0, snapshotMs: 0, serverSnapshotMs: 0, gaps: 0, bufferedBytes: 0, inputAck: 0, interpolationMs: 60 });
 
   const lastPhaseRef = useRef<string | null>(null);
   const meEliminatedRef = useRef<boolean>(false);
@@ -78,8 +78,11 @@ export function App() {
   const pingSentAtRef = useRef(new Map<number, number>());
   const lastSnapshotSequenceRef = useRef(0);
   const lastSnapshotReceivedAtRef = useRef(0);
+  const lastSnapshotServerTimeRef = useRef(0);
   const rttRef = useRef(0);
   const inputSequenceRef = useRef(0);
+  const finishScreenTimeoutRef = useRef<number | null>(null);
+  const matchGenerationRef = useRef(0);
   const inputHistoryRef = useRef<Array<{ sequence: number; sentAt: number; input: PlayerInputPacket }>>([]);
   const acknowledgedInputRef = useRef<{ sequence: number; input: PlayerInputPacket } | null>(null);
   const serverClockOffsetRef = useRef<number | null>(null);
@@ -199,18 +202,23 @@ export function App() {
           }
         }
         const snapshotMs = lastSnapshotReceivedAtRef.current ? receivedAt - lastSnapshotReceivedAtRef.current : 0;
+        const serverTime = Number(msg.serverTime) || 0;
+        const serverSnapshotMs = serverTime && lastSnapshotServerTimeRef.current
+          ? serverTime - lastSnapshotServerTimeRef.current
+          : snapshotMs;
         lastSnapshotReceivedAtRef.current = receivedAt;
-        if (snapshotMs > 0) {
-          const intervalError = Math.abs(snapshotMs - snapshotIntervalEwmaRef.current);
+        if (serverTime) lastSnapshotServerTimeRef.current = serverTime;
+        if (serverSnapshotMs > 0) {
+          const intervalError = Math.abs(snapshotMs - serverSnapshotMs);
           snapshotJitterEwmaRef.current = snapshotJitterEwmaRef.current * 0.8 + intervalError * 0.2;
-          snapshotIntervalEwmaRef.current = snapshotIntervalEwmaRef.current * 0.8 + snapshotMs * 0.2;
-          const targetDelay = Math.max(50, Math.min(150, 50 + snapshotJitterEwmaRef.current * 2));
+          snapshotIntervalEwmaRef.current = snapshotIntervalEwmaRef.current * 0.8 + serverSnapshotMs * 0.2;
+          const targetDelay = Math.max(50, Math.min(220, snapshotIntervalEwmaRef.current * 1.5 + snapshotJitterEwmaRef.current * 2));
           interpolationDelayRef.current += (targetDelay - interpolationDelayRef.current) * 0.15;
           setNetworkStats((stats) => ({ ...stats, interpolationMs: Math.round(interpolationDelayRef.current) }));
         }
-        setNetworkStats((stats) => ({ ...stats, snapshotMs, inputAck }));
+        setNetworkStats((stats) => ({ ...stats, snapshotMs, serverSnapshotMs, inputAck }));
         const snapshots = onlineSnapshotsRef.current;
-        snapshots.push({ receivedAt, serverTime: Number(msg.serverTime) || 0, sequence, serverTick: Number(msg.serverTick) || 0, inputAcks, snapshot: snap });
+        snapshots.push({ receivedAt, serverTime, sequence, serverTick: Number(msg.serverTick) || 0, inputAcks, snapshot: snap });
         if (snapshots.length > 8) snapshots.splice(0, snapshots.length - 8);
         const now = performance.now();
         if (lastHudSnapshotAtRef.current === 0 || snap.phase === 'FINISHED' || now - lastHudSnapshotAtRef.current >= 100) {
@@ -239,9 +247,15 @@ export function App() {
         }
 
         if (snap.phase === 'FINISHED') {
-          setTimeout(() => {
-            setScreen((cur) => (cur === 'PLAYING' ? 'RESULTS' : cur));
-          }, 1200);
+          if (finishScreenTimeoutRef.current === null) {
+            const generation = matchGenerationRef.current;
+            finishScreenTimeoutRef.current = window.setTimeout(() => {
+              finishScreenTimeoutRef.current = null;
+              if (matchGenerationRef.current === generation) {
+                setScreen((cur) => (cur === 'PLAYING' ? 'RESULTS' : cur));
+              }
+            }, 1200);
+          }
         }
         break;
       }
@@ -354,7 +368,11 @@ export function App() {
     cleanupMatch();
 
     setSnapshot(null);
+    lastPhaseRef.current = null;
+    meEliminatedRef.current = false;
     lastHudSnapshotAtRef.current = 0;
+    inputSequenceRef.current = 0;
+    setNetworkStats((stats) => ({ ...stats, inputAck: 0, snapshotMs: 0 }));
     setScreen('PLAYING');
     setIsPaused(false);
     setSelectedGhostAbility(null);
@@ -366,6 +384,7 @@ export function App() {
     inputHistoryRef.current = [];
     acknowledgedInputRef.current = null;
     lastSnapshotReceivedAtRef.current = 0;
+    lastSnapshotServerTimeRef.current = 0;
     lastPredictedLocalRef.current = null;
     localCorrectionRef.current = { x: 0, y: 0, z: 0 };
     localJumpPredictedRef.current = false;
@@ -432,9 +451,15 @@ export function App() {
       processSnapshotAnnouncements(snap);
       if (snap.phase === 'FINISHED') {
         engine.setPaused(true);
-        setTimeout(() => {
-          setScreen((cur) => (cur === 'PLAYING' ? 'RESULTS' : cur));
-        }, 1200);
+        if (finishScreenTimeoutRef.current === null) {
+          const generation = matchGenerationRef.current;
+          finishScreenTimeoutRef.current = window.setTimeout(() => {
+            finishScreenTimeoutRef.current = null;
+            if (matchGenerationRef.current === generation) {
+              setScreen((cur) => (cur === 'PLAYING' ? 'RESULTS' : cur));
+            }
+          }, 1200);
+        }
       }
     });
 
@@ -469,6 +494,11 @@ export function App() {
   };
 
   const cleanupMatch = () => {
+    matchGenerationRef.current += 1;
+    if (finishScreenTimeoutRef.current !== null) {
+      window.clearTimeout(finishScreenTimeoutRef.current);
+      finishScreenTimeoutRef.current = null;
+    }
     if (typeof document !== 'undefined' && document.pointerLockElement) {
       try {
         document.exitPointerLock();
@@ -701,6 +731,8 @@ export function App() {
     setIsPaused(false);
     if (isOnline) {
       sendSocketMessage({ type: 'RETURN_TO_LOBBY' });
+      cleanupMatch();
+      setSnapshot(null);
       setScreen('LOBBY');
     } else {
       handleStartLocalGame();
@@ -1025,6 +1057,7 @@ export function App() {
         <ResultsScreen
           winner={snapshot.winner}
           allPlayers={snapshot.players}
+          myPlayerId={myPlayerId}
           onPlayAgain={isOnline ? handleRestart : handleStartLocalGame}
           onMainMenu={handleMainMenu}
         />

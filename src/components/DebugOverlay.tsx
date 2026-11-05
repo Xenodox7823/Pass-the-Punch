@@ -3,7 +3,7 @@ import { GameSnapshot } from '../game/types';
 
 interface DebugOverlayProps {
   snapshot: GameSnapshot;
-  networkStats?: { rttMs: number; jitterMs: number; snapshotMs: number; gaps: number; bufferedBytes: number; inputAck: number; interpolationMs: number };
+  networkStats?: { rttMs: number; jitterMs: number; snapshotMs: number; serverSnapshotMs: number; gaps: number; bufferedBytes: number; inputAck: number; interpolationMs: number };
   onClose: () => void;
 }
 
@@ -28,7 +28,8 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({ snapshot, networkSta
         {networkStats && <>
           <div><span className="text-slate-400">Network RTT:</span> <span className="text-sky-300">{networkStats.rttMs} ms</span></div>
           <div><span className="text-slate-400">RTT variation:</span> <span className="text-sky-300">{networkStats.jitterMs} ms</span></div>
-          <div><span className="text-slate-400">Snapshot interval:</span> <span className="text-sky-300">{networkStats.snapshotMs.toFixed(0)} ms</span></div>
+          <div><span className="text-slate-400">Arrival interval:</span> <span className="text-sky-300">{networkStats.snapshotMs.toFixed(0)} ms</span></div>
+          <div><span className="text-slate-400">Server snapshot:</span> <span className="text-sky-300">{networkStats.serverSnapshotMs.toFixed(0)} ms</span></div>
           <div><span className="text-slate-400">Interpolation buffer:</span> <span className="text-sky-300">{networkStats.interpolationMs} ms</span></div>
           <div><span className="text-slate-400">Sequence gaps:</span> <span className="text-amber-300">{networkStats.gaps}</span></div>
           <div><span className="text-slate-400">Input acknowledged:</span> <span className="text-sky-300">#{networkStats.inputAck}</span></div>
