@@ -89,7 +89,11 @@ export function App() {
   const snapshotIntervalEwmaRef = useRef(1000 / 30);
   const snapshotJitterEwmaRef = useRef(0);
   const interpolationDelayRef = useRef(60);
-  const lastPredictedLocalRef = useRef<{ sequence: number; state: GameSnapshot['players'][number] } | null>(null);
+  const lastPredictedLocalRef = useRef<{
+    sequence: number;
+    state: GameSnapshot['players'][number];
+    rendered: { x: number; y: number; z: number };
+  } | null>(null);
   const localCorrectionRef = useRef({ x: 0, y: 0, z: 0 });
   const localJumpPredictedRef = useRef(false);
   const pointerDragRef = useRef<{ isDragging: boolean; lastX: number; lastY: number; moved: boolean }>({
@@ -630,9 +634,9 @@ export function App() {
                       simulateUntil(replayEnd);
 
                       if (previousPrediction) {
-                        const dx = previousPrediction.state.x - predicted.x;
-                        const dy = previousPrediction.state.y - predicted.y;
-                        const dz = previousPrediction.state.z - predicted.z;
+                        const dx = previousPrediction.rendered.x - predicted.x;
+                        const dy = previousPrediction.rendered.y - predicted.y;
+                        const dz = previousPrediction.rendered.z - predicted.z;
                         const error = Math.hypot(dx, dy, dz);
                         const correctionScale = error > 1.5 ? 0 : 1;
                         localCorrectionRef.current = { x: dx * correctionScale, y: dy * correctionScale, z: dz * correctionScale };
@@ -662,13 +666,15 @@ export function App() {
                     localCorrectionRef.current.x *= correctionDecay;
                     localCorrectionRef.current.y *= correctionDecay;
                     localCorrectionRef.current.z *= correctionDecay;
-                    predicted.x += localCorrectionRef.current.x;
-                    predicted.y += localCorrectionRef.current.y;
-                    predicted.z += localCorrectionRef.current.z;
-                    lastPredictedLocalRef.current = { sequence: latest.sequence, state: predicted };
-                    player.x = predicted.x;
-                    player.y = predicted.y;
-                    player.z = predicted.z;
+                    const rendered = {
+                      x: predicted.x + localCorrectionRef.current.x,
+                      y: predicted.y + localCorrectionRef.current.y,
+                      z: predicted.z + localCorrectionRef.current.z,
+                    };
+                    lastPredictedLocalRef.current = { sequence: latest.sequence, state: predicted, rendered };
+                    player.x = rendered.x;
+                    player.y = rendered.y;
+                    player.z = rendered.z;
                     player.vx = predicted.vx;
                     player.vy = predicted.vy;
                     player.vz = predicted.vz;
