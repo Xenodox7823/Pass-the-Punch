@@ -2,6 +2,7 @@ services:
   - type: web
     name: pass-the-punch-server
     runtime: node
+    region: singapore
     plan: free
     buildCommand: npm ci && npm run build
     startCommand: npm start

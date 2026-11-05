@@ -5,8 +5,9 @@ The game can use Vercel for the static website and Render for its Node.js HTTP a
 ## Render game server
 
 1. In Render, create a Blueprint from this repository and select `render.yaml`.
-2. Wait for the service to finish its first deploy. Copy its public URL, such as `https://pass-the-punch-server.onrender.com`.
-3. Render's free instance has limited CPU and memory and may take time to wake after inactivity. It is suitable for trying the game, but it cannot promise low latency or uninterrupted matches. Its in-memory rooms are cleared by restarts and deploys.
+2. The Blueprint targets Singapore, which is the closest configured Render region for players in India and much of Asia. Wait for the service to finish its first deploy and copy its public URL.
+3. Render does not let you move an existing service between regions. If your current game server is in Oregon or another region, create a replacement service in Singapore, switch the website's `VITE_GAME_SERVER_URL` to the replacement URL, and redeploy the website. Test the replacement before deleting the old service.
+4. Render's free instance has limited CPU and memory and may take time to wake after inactivity. It is suitable for trying the game, but it cannot promise low latency or uninterrupted matches. Its in-memory rooms are cleared by restarts and deploys.
 
 ## Vercel website
 

@@ -219,7 +219,7 @@ export function App() {
         setNetworkStats((stats) => ({ ...stats, snapshotMs, serverSnapshotMs, inputAck }));
         const snapshots = onlineSnapshotsRef.current;
         snapshots.push({ receivedAt, serverTime, sequence, serverTick: Number(msg.serverTick) || 0, inputAcks, snapshot: snap });
-        if (snapshots.length > 8) snapshots.splice(0, snapshots.length - 8);
+        if (snapshots.length > 32) snapshots.splice(0, snapshots.length - 32);
         const now = performance.now();
         if (lastHudSnapshotAtRef.current === 0 || snap.phase === 'FINISHED' || now - lastHudSnapshotAtRef.current >= 100) {
           setSnapshot(snap);
@@ -543,11 +543,13 @@ export function App() {
         if (renderer3DRef.current) {
           if (isOnline && engineRef.current) {
             const buffer = onlineSnapshotsRef.current;
-            const hasServerClock = serverClockOffsetRef.current !== null && buffer.every((entry) => entry.serverTime > 0);
-            const renderNow = hasServerClock
+            const clockAvailable = serverClockOffsetRef.current !== null && buffer.every((entry) => entry.serverTime > 0);
+            const serverRenderNow = clockAvailable
               ? performance.now() + (serverClockOffsetRef.current ?? 0)
-              : performance.now();
-            const renderAt = renderNow - interpolationDelayRef.current;
+              : 0;
+            const serverRenderAt = serverRenderNow - interpolationDelayRef.current;
+            const hasServerClock = clockAvailable && buffer.length >= 2 && buffer[0].serverTime <= serverRenderAt;
+            const renderAt = hasServerClock ? serverRenderAt : performance.now() - interpolationDelayRef.current;
             const frameTime = (entry: typeof buffer[number]) => hasServerClock ? entry.serverTime : entry.receivedAt;
             while (buffer.length > 2 && frameTime(buffer[1]) <= renderAt) buffer.shift();
             if (buffer.length >= 2) {
