@@ -159,7 +159,7 @@ async function startServer() {
             const room = roomManager.getRoomBySocket(socketId);
             if (room && room.status === 'PLAYING') {
               const input = parsePlayerInput(msg.input);
-              if (input) room.handleInput(socketId, input);
+              if (input) room.handleInput(socketId, input, Number(msg.sequence));
             }
             break;
           }
@@ -203,7 +203,7 @@ async function startServer() {
           }
 
           case 'PING': {
-            ws.send(JSON.stringify({ type: 'PONG', timestamp: msg.timestamp }));
+            ws.send(JSON.stringify({ type: 'PONG', timestamp: msg.timestamp, serverTime: Date.now() }));
             break;
           }
 

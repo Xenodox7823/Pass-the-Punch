@@ -3,10 +3,11 @@ import { GameSnapshot } from '../game/types';
 
 interface DebugOverlayProps {
   snapshot: GameSnapshot;
+  networkStats?: { rttMs: number; jitterMs: number; snapshotMs: number; gaps: number; bufferedBytes: number; inputAck: number; interpolationMs: number };
   onClose: () => void;
 }
 
-export const DebugOverlay: React.FC<DebugOverlayProps> = ({ snapshot, onClose }) => {
+export const DebugOverlay: React.FC<DebugOverlayProps> = ({ snapshot, networkStats, onClose }) => {
   return (
     <div className="absolute top-16 left-4 z-40 bg-slate-950/95 border border-amber-500/60 rounded-xl p-3 shadow-2xl font-mono text-[11px] text-amber-300 max-w-xs pointer-events-auto backdrop-blur-md">
       <div className="flex items-center justify-between border-b border-amber-500/30 pb-1 mb-2">
@@ -24,6 +25,15 @@ export const DebugOverlay: React.FC<DebugOverlayProps> = ({ snapshot, onClose })
           <span className="text-slate-400">FPS:</span>{' '}
           <span className="text-emerald-400 font-bold">{snapshot.debugFps}</span>
         </div>
+        {networkStats && <>
+          <div><span className="text-slate-400">Network RTT:</span> <span className="text-sky-300">{networkStats.rttMs} ms</span></div>
+          <div><span className="text-slate-400">RTT variation:</span> <span className="text-sky-300">{networkStats.jitterMs} ms</span></div>
+          <div><span className="text-slate-400">Snapshot interval:</span> <span className="text-sky-300">{networkStats.snapshotMs.toFixed(0)} ms</span></div>
+          <div><span className="text-slate-400">Interpolation buffer:</span> <span className="text-sky-300">{networkStats.interpolationMs} ms</span></div>
+          <div><span className="text-slate-400">Sequence gaps:</span> <span className="text-amber-300">{networkStats.gaps}</span></div>
+          <div><span className="text-slate-400">Input acknowledged:</span> <span className="text-sky-300">#{networkStats.inputAck}</span></div>
+          <div><span className="text-slate-400">Outbound queue:</span> <span className="text-amber-300">{(networkStats.bufferedBytes / 1024).toFixed(1)} KB</span></div>
+        </>}
         <div>
           <span className="text-slate-400">Phase:</span>{' '}
           <span className="text-yellow-400 font-bold">{snapshot.phase}</span>

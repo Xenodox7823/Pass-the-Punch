@@ -33,6 +33,20 @@ export class GameRoom {
   public clients: Map<string, ConnectedClient> = new Map();
   public engine: GameEngine | null = null;
   private simulationTimer: NodeJS.Timeout | null = null;
+  private lastLoopAt = 0;
+  private accumulatorMs = 0;
+  private tickDurationTotalMs = 0;
+  private tickDurationMaxMs = 0;
+  private tickOverruns = 0;
+  private measuredTicks = 0;
+  private snapshotBytesTotal = 0;
+  private snapshotSerializationTotalMs = 0;
+  private snapshotSamples = 0;
+  private snapshotSequence = 0;
+  private simulationTick = 0;
+  private maxBufferedAmount = 0;
+  private skippedSnapshots = 0;
+  private inputSequences = new Map<number, number>();
 
   constructor(code: string, hostSocketId: string, hostName: string, hostSocket: WebSocket) {
     this.code = code;
@@ -173,27 +187,37 @@ export class GameRoom {
     this.engine = new GameEngine(this.settings, humanNames);
 
     this.engine.setSnapshotCallback((snapshot: GameSnapshot) => {
-      this.broadcast({
-        type: 'GAME_SNAPSHOT',
-        snapshot,
-      });
+      this.snapshotSequence += 1;
+      this.broadcastSnapshot(snapshot);
 
       if (snapshot.phase === 'FINISHED') {
         this.status = 'FINISHED';
       }
     });
 
-    // A 40 Hz authoritative step reduces CPU load on small free instances.
-    // Keep the 20 Hz snapshot cadence so clients can interpolate smoothly.
+    // Keep the current 40 Hz authoritative rate while driving it from monotonic elapsed time.
     const tickRate = 40;
-    const dt = 1 / tickRate;
-    let tick = 0;
+    const stepMs = 1000 / tickRate;
+    this.lastLoopAt = performance.now();
+    this.accumulatorMs = 0;
     this.simulationTimer = setInterval(() => {
-      if (this.engine) {
-        tick += 1;
-        this.engine.step(dt, tick % 2 === 0);
+      const now = performance.now();
+      this.accumulatorMs += now - this.lastLoopAt;
+      this.lastLoopAt = now;
+      let catchupSteps = 0;
+      while (this.engine && this.accumulatorMs >= stepMs && catchupSteps < 4) {
+        const tickStartedAt = performance.now();
+        this.simulationTick += 1;
+        this.engine.step(stepMs / 1000, this.simulationTick % 2 === 0);
+        const tickDuration = performance.now() - tickStartedAt;
+        this.measuredTicks += 1;
+        this.tickDurationTotalMs += tickDuration;
+        this.tickDurationMaxMs = Math.max(this.tickDurationMaxMs, tickDuration);
+        if (tickDuration > stepMs) this.tickOverruns += 1;
+        this.accumulatorMs -= stepMs;
+        catchupSteps += 1;
       }
-    }, 1000 / tickRate);
+    }, 4);
 
     this.broadcast({
       type: 'MATCH_STARTED',
@@ -213,9 +237,12 @@ export class GameRoom {
     this.status = 'LOBBY';
   }
 
-  public handleInput(socketId: string, input: PlayerInputPacket) {
+  public handleInput(socketId: string, input: PlayerInputPacket, sequence: number) {
     const client = this.clients.get(socketId);
     if (!client || !this.engine) return;
+    const previousSequence = this.inputSequences.get(client.playerId) ?? 0;
+    if (!Number.isSafeInteger(sequence) || sequence <= previousSequence) return;
+    this.inputSequences.set(client.playerId, sequence);
     this.engine.setPlayerInput(client.playerId, input);
   }
 
@@ -235,6 +262,49 @@ export class GameRoom {
           // ignore closed socket error
         }
       }
+    }
+  }
+
+  private broadcastSnapshot(snapshot: GameSnapshot) {
+    const serializationStartedAt = performance.now();
+    const message = JSON.stringify({
+      type: 'GAME_SNAPSHOT',
+      sequence: this.snapshotSequence,
+      serverTime: Date.now(),
+      serverTick: this.simulationTick,
+      inputAcks: Object.fromEntries(this.inputSequences),
+      snapshot,
+    });
+    const serializationMs = performance.now() - serializationStartedAt;
+    const payloadBytes = Buffer.byteLength(message);
+    this.snapshotBytesTotal += payloadBytes;
+    this.snapshotSerializationTotalMs += serializationMs;
+    this.snapshotSamples += 1;
+    for (const client of this.clients.values()) {
+      if (client.isDisconnected || client.socket.readyState !== WebSocket.OPEN) continue;
+      this.maxBufferedAmount = Math.max(this.maxBufferedAmount, client.socket.bufferedAmount);
+      // State snapshots become stale quickly; do not queue a long history behind a slow connection.
+      if (client.socket.bufferedAmount > 256 * 1024) {
+        this.skippedSnapshots += 1;
+        continue;
+      }
+      try {
+        client.socket.send(message);
+      } catch {
+        // ignore closed socket error
+      }
+    }
+    if (this.simulationTick % 400 === 0) {
+      console.info(`[net] room=${this.code} tick=${this.simulationTick} snapshot=${this.snapshotSequence} avgTickMs=${(this.tickDurationTotalMs / Math.max(1, this.measuredTicks)).toFixed(2)} maxTickMs=${this.tickDurationMaxMs.toFixed(2)} overruns=${this.tickOverruns} avgSnapshotBytes=${Math.round(this.snapshotBytesTotal / Math.max(1, this.snapshotSamples))} avgSerializeMs=${(this.snapshotSerializationTotalMs / Math.max(1, this.snapshotSamples)).toFixed(2)} maxBuffered=${this.maxBufferedAmount} skipped=${this.skippedSnapshots}`);
+      this.maxBufferedAmount = 0;
+      this.skippedSnapshots = 0;
+      this.tickDurationTotalMs = 0;
+      this.tickDurationMaxMs = 0;
+      this.tickOverruns = 0;
+      this.measuredTicks = 0;
+      this.snapshotBytesTotal = 0;
+      this.snapshotSerializationTotalMs = 0;
+      this.snapshotSamples = 0;
     }
   }
 }

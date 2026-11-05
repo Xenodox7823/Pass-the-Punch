@@ -10,6 +10,7 @@ import {
   TouchLayoutSettings,
 } from './game/types';
 import { GameEngine } from './game/GameEngine';
+import { updatePlayerPhysics } from './game/physics';
 import { CameraViewMode, GameRenderer3D } from './render/GameRenderer3D';
 import { InputManager } from './input/InputManager';
 import { MainMenu } from './components/MainMenu';
@@ -61,6 +62,7 @@ export function App() {
   const [cameraMode, setCameraMode] = useState<CameraViewMode>('THIRD_PERSON');
   const [selectedGhostAbility, setSelectedGhostAbility] = useState<GhostAbilityType | null>(null);
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null);
+  const [networkStats, setNetworkStats] = useState({ rttMs: 0, jitterMs: 0, snapshotMs: 0, gaps: 0, bufferedBytes: 0, inputAck: 0, interpolationMs: 80 });
 
   const lastPhaseRef = useRef<string | null>(null);
   const meEliminatedRef = useRef<boolean>(false);
@@ -70,8 +72,22 @@ export function App() {
   const renderer3DRef = useRef<GameRenderer3D | null>(null);
   const inputManagerRef = useRef<InputManager | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const onlineSnapshotsRef = useRef<Array<{ receivedAt: number; snapshot: GameSnapshot }>>([]);
+  const handleSocketMessageRef = useRef<(msg: { type: string; [key: string]: unknown }) => void>(() => {});
+  const onlineSnapshotsRef = useRef<Array<{ receivedAt: number; serverTime: number; sequence: number; serverTick: number; inputAcks: Record<string, number>; snapshot: GameSnapshot }>>([]);
   const lastHudSnapshotAtRef = useRef(0);
+  const pingSentAtRef = useRef(new Map<number, number>());
+  const lastSnapshotSequenceRef = useRef(0);
+  const lastSnapshotReceivedAtRef = useRef(0);
+  const rttRef = useRef(0);
+  const inputSequenceRef = useRef(0);
+  const inputHistoryRef = useRef<Array<{ sequence: number; sentAt: number; input: PlayerInputPacket }>>([]);
+  const acknowledgedInputRef = useRef<{ sequence: number; input: PlayerInputPacket } | null>(null);
+  const serverClockOffsetRef = useRef<number | null>(null);
+  const snapshotIntervalEwmaRef = useRef(50);
+  const snapshotJitterEwmaRef = useRef(0);
+  const interpolationDelayRef = useRef(80);
+  const lastPredictedLocalRef = useRef<{ sequence: number; x: number; y: number; z: number } | null>(null);
+  const localCorrectionRef = useRef({ x: 0, y: 0, z: 0 });
   const pointerDragRef = useRef<{ isDragging: boolean; lastX: number; lastY: number; moved: boolean }>({
     isDragging: false,
     lastX: 0,
@@ -120,7 +136,7 @@ export function App() {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          handleSocketMessage(msg);
+          handleSocketMessageRef.current(msg);
         } catch (e) {
           console.error('Socket message parse error:', e);
         }
@@ -164,8 +180,36 @@ export function App() {
 
       case 'GAME_SNAPSHOT': {
         const snap = msg.snapshot as GameSnapshot;
+        const sequence = Number(msg.sequence) || 0;
+        const receivedAt = performance.now();
+        if (sequence > 0 && lastSnapshotSequenceRef.current > 0 && sequence > lastSnapshotSequenceRef.current + 1) {
+          setNetworkStats((stats) => ({ ...stats, gaps: stats.gaps + sequence - lastSnapshotSequenceRef.current - 1 }));
+        }
+        if (sequence > 0) lastSnapshotSequenceRef.current = sequence;
+        const inputAcks = (msg.inputAcks && typeof msg.inputAcks === 'object' ? msg.inputAcks : {}) as Record<string, number>;
+        const inputAck = Number(inputAcks[String(myPlayerId)]) || 0;
+        if (inputAck > (acknowledgedInputRef.current?.sequence ?? 0)) {
+          const acknowledged = inputHistoryRef.current
+            .filter((entry) => entry.sequence <= inputAck)
+            .sort((a, b) => b.sequence - a.sequence)[0];
+          if (acknowledged) {
+            acknowledgedInputRef.current = { sequence: acknowledged.sequence, input: acknowledged.input };
+            inputHistoryRef.current = inputHistoryRef.current.filter((entry) => entry.sequence > inputAck);
+          }
+        }
+        const snapshotMs = lastSnapshotReceivedAtRef.current ? receivedAt - lastSnapshotReceivedAtRef.current : 0;
+        lastSnapshotReceivedAtRef.current = receivedAt;
+        if (snapshotMs > 0) {
+          const intervalError = Math.abs(snapshotMs - snapshotIntervalEwmaRef.current);
+          snapshotJitterEwmaRef.current = snapshotJitterEwmaRef.current * 0.8 + intervalError * 0.2;
+          snapshotIntervalEwmaRef.current = snapshotIntervalEwmaRef.current * 0.8 + snapshotMs * 0.2;
+          const targetDelay = Math.max(60, Math.min(150, 60 + snapshotJitterEwmaRef.current * 2));
+          interpolationDelayRef.current += (targetDelay - interpolationDelayRef.current) * 0.15;
+          setNetworkStats((stats) => ({ ...stats, interpolationMs: Math.round(interpolationDelayRef.current) }));
+        }
+        setNetworkStats((stats) => ({ ...stats, snapshotMs, inputAck }));
         const snapshots = onlineSnapshotsRef.current;
-        snapshots.push({ receivedAt: performance.now(), snapshot: snap });
+        snapshots.push({ receivedAt, serverTime: Number(msg.serverTime) || 0, sequence, serverTick: Number(msg.serverTick) || 0, inputAcks, snapshot: snap });
         if (snapshots.length > 8) snapshots.splice(0, snapshots.length - 8);
         const now = performance.now();
         if (lastHudSnapshotAtRef.current === 0 || snap.phase === 'FINISHED' || now - lastHudSnapshotAtRef.current >= 100) {
@@ -174,9 +218,8 @@ export function App() {
         }
         processSnapshotAnnouncements(snap);
 
-        // Sync authoritative positions to client display engine for 3D rendering
+        // Sync non-positional world state. Player positions are owned by the render interpolation loop.
         if (engineRef.current) {
-          engineRef.current.players = snap.players;
           engineRef.current.matchFlow.phase = snap.phase;
           engineRef.current.matchFlow.countdownTimer = snap.countdownTimer;
           engineRef.current.matchFlow.timeRemaining = snap.timeRemaining;
@@ -202,6 +245,26 @@ export function App() {
         break;
       }
 
+      case 'PONG': {
+        const timestamp = Number(msg.timestamp);
+        const sentAt = pingSentAtRef.current.get(timestamp);
+        if (sentAt !== undefined) {
+          const rttMs = performance.now() - sentAt;
+          const serverTime = Number(msg.serverTime);
+          if (Number.isFinite(serverTime)) {
+            const observedOffset = serverTime - (sentAt + rttMs / 2);
+            serverClockOffsetRef.current = serverClockOffsetRef.current === null
+              ? observedOffset
+              : serverClockOffsetRef.current * 0.8 + observedOffset * 0.2;
+          }
+          const jitterMs = rttRef.current ? Math.abs(rttMs - rttRef.current) : 0;
+          rttRef.current = rttRef.current ? rttRef.current * 0.8 + rttMs * 0.2 : rttMs;
+          pingSentAtRef.current.delete(timestamp);
+          setNetworkStats((stats) => ({ ...stats, rttMs: Math.round(rttRef.current), jitterMs: Math.round(jitterMs), bufferedBytes: socketRef.current?.bufferedAmount ?? 0 }));
+        }
+        break;
+      }
+
       case 'ERROR': {
         setIsConnecting(false);
         setConnectionError(String(msg.message || 'Multiplayer error'));
@@ -213,10 +276,50 @@ export function App() {
     }
   };
 
+  handleSocketMessageRef.current = handleSocketMessage;
+
+  useEffect(() => {
+    if (!isOnline || screen !== 'PLAYING') return;
+    const ping = () => {
+      const timestamp = Math.round(performance.now());
+      pingSentAtRef.current.set(timestamp, performance.now());
+      sendSocketMessage({ type: 'PING', timestamp });
+      if (socketRef.current && socketRef.current.bufferedAmount >= 0) {
+        setNetworkStats((stats) => ({ ...stats, bufferedBytes: socketRef.current?.bufferedAmount ?? 0 }));
+      }
+      for (const [key, sentAt] of pingSentAtRef.current) {
+        if (performance.now() - sentAt > 10000) pingSentAtRef.current.delete(key);
+      }
+    };
+    ping();
+    const timer = window.setInterval(ping, 2000);
+    return () => window.clearInterval(timer);
+  }, [isOnline, screen]);
+
+  useEffect(() => {
+    if (!isOnline || screen !== 'PLAYING') return;
+    const timer = window.setInterval(() => {
+      const input = inputManagerRef.current?.currentPacket;
+      if (!input || socketRef.current?.readyState !== WebSocket.OPEN) return;
+      sendPlayerInput(input);
+    }, 1000 / 30);
+    return () => window.clearInterval(timer);
+  }, [isOnline, screen]);
+
   const sendSocketMessage = (payload: object) => {
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify(payload));
     }
+  };
+
+  const sendPlayerInput = (input: PlayerInputPacket) => {
+    inputSequenceRef.current += 1;
+    const sequence = inputSequenceRef.current;
+    const sentAt = performance.now();
+    const inputCopy = { ...input };
+    inputHistoryRef.current.push({ sequence, sentAt, input: inputCopy });
+    if (inputHistoryRef.current.length > 128) inputHistoryRef.current.splice(0, inputHistoryRef.current.length - 128);
+    sendSocketMessage({ type: 'PLAYER_INPUT', sequence, input: inputCopy });
   };
 
   // Create Online Room
@@ -259,19 +362,18 @@ export function App() {
     const engine = new GameEngine(currentRoom.settings);
     engineRef.current = engine;
     onlineSnapshotsRef.current = [];
+    inputHistoryRef.current = [];
+    acknowledgedInputRef.current = null;
+    lastSnapshotReceivedAtRef.current = 0;
+    lastPredictedLocalRef.current = null;
+    localCorrectionRef.current = { x: 0, y: 0, z: 0 };
 
     const inputMgr = new InputManager(
       engine,
       keybinds,
       () => {},
       () => setShowDebug((prev) => !prev),
-      (packet: PlayerInputPacket) => {
-        // Stream inputs to authoritative server
-        sendSocketMessage({
-          type: 'PLAYER_INPUT',
-          input: packet,
-        });
-      }
+      (input: PlayerInputPacket) => sendPlayerInput(input)
     );
     inputManagerRef.current = inputMgr;
   };
@@ -409,14 +511,21 @@ export function App() {
         if (renderer3DRef.current) {
           if (isOnline && engineRef.current) {
             const buffer = onlineSnapshotsRef.current;
-            const renderAt = performance.now() - 100;
-            while (buffer.length > 2 && buffer[1].receivedAt <= renderAt) buffer.shift();
+            const hasServerClock = serverClockOffsetRef.current !== null && buffer.every((entry) => entry.serverTime > 0);
+            const renderNow = hasServerClock
+              ? performance.now() + (serverClockOffsetRef.current ?? 0)
+              : performance.now();
+            const renderAt = renderNow - interpolationDelayRef.current;
+            const frameTime = (entry: typeof buffer[number]) => hasServerClock ? entry.serverTime : entry.receivedAt;
+            while (buffer.length > 2 && frameTime(buffer[1]) <= renderAt) buffer.shift();
             if (buffer.length >= 2) {
               const first = buffer[0];
               const second = buffer[1];
               const latest = buffer[buffer.length - 1];
-              const span = Math.max(1, second.receivedAt - first.receivedAt);
-              const alpha = Math.max(0, Math.min(1, (renderAt - first.receivedAt) / span));
+              const firstTime = frameTime(first);
+              const secondTime = frameTime(second);
+              const span = Math.max(1, secondTime - firstTime);
+              const alpha = Math.max(0, Math.min(1, (renderAt - firstTime) / span));
               const previousPlayers = new Map(first.snapshot.players.map((player) => [player.id, player]));
               const latestPlayers = new Map(latest.snapshot.players.map((player) => [player.id, player]));
               engineRef.current.players = second.snapshot.players.map((source) => {
@@ -430,15 +539,88 @@ export function App() {
                   player.rotationY = previous.rotationY + angleDelta * alpha;
                 }
 
-                // Predict only the local player's short movement between snapshots
-                // to avoid visible 20 Hz stepping while retaining server authority.
                 if (player.id === myPlayerId) {
                   const authoritative = latestPlayers.get(player.id);
-                  const age = Math.min(0.075, Math.max(0, (performance.now() - latest.receivedAt) / 1000));
                   if (authoritative) {
-                    player.x = authoritative.x + authoritative.vx * age;
-                    player.y = authoritative.y + authoritative.vy * age;
-                    player.z = authoritative.z + authoritative.vz * age;
+                    const predicted = { ...authoritative, stats: { ...authoritative.stats } };
+                    const now = performance.now();
+                    const snapshotClientTime = latest.serverTime && serverClockOffsetRef.current !== null
+                      ? latest.serverTime - serverClockOffsetRef.current
+                      : latest.receivedAt - rttRef.current / 2;
+                    const replayStart = Math.min(now, snapshotClientTime);
+                    const replayEnd = Math.max(replayStart, now);
+                    const age = Math.min(0.18, Math.max(0, (replayEnd - replayStart) / 1000));
+                    const countdown = latest.snapshot.countdownTimer > 0;
+                    const inputAck = latest.inputAcks[String(myPlayerId)] ?? 0;
+                    const previousPrediction = lastPredictedLocalRef.current;
+                    if (previousPrediction && previousPrediction.sequence !== latest.sequence) {
+                      const dx = previousPrediction.x - authoritative.x;
+                      const dy = previousPrediction.y - authoritative.y;
+                      const dz = previousPrediction.z - authoritative.z;
+                      const error = Math.hypot(dx, dy, dz);
+                      const correctionScale = error > 1.5 ? 0 : 1;
+                      localCorrectionRef.current = { x: dx * correctionScale, y: dy * correctionScale, z: dz * correctionScale };
+                    }
+                    const acknowledged = acknowledgedInputRef.current;
+                    let activeInput: PlayerInputPacket = acknowledged && acknowledged.sequence <= inputAck
+                      ? acknowledged.input
+                      : { forward: false, backward: false, left: false, right: false, jump: false, punch: false, dodge: false, cameraYaw: 0 };
+                    const pendingInputs = inputHistoryRef.current
+                      .filter((entry) => entry.sequence > inputAck && entry.sentAt <= replayEnd)
+                      .sort((a, b) => a.sentAt - b.sentAt || a.sequence - b.sequence);
+                    let cursor = replayStart;
+                    let jumpPending = false;
+                    const simulateUntil = (until: number) => {
+                      let remaining = Math.max(0, until - cursor);
+                      let firstStep = true;
+                      while (remaining > 0) {
+                        const step = Math.min(1000 / 60, remaining) / 1000;
+                        let rawX = (activeInput.right ? 1 : 0) - (activeInput.left ? 1 : 0) + (activeInput.analogX ?? 0);
+                        let rawZ = (activeInput.forward ? 1 : 0) - (activeInput.backward ? 1 : 0) + (activeInput.analogY ?? 0);
+                        rawX = Math.max(-1, Math.min(1, rawX));
+                        rawZ = Math.max(-1, Math.min(1, rawZ));
+                        const yaw = activeInput.cameraYaw || 0;
+                        const moveX = countdown ? 0 : -rawX * Math.cos(yaw) + rawZ * Math.sin(yaw);
+                        const moveZ = countdown ? 0 : rawX * Math.sin(yaw) + rawZ * Math.cos(yaw);
+                        updatePlayerPhysics(
+                          predicted,
+                          step,
+                          moveX,
+                          moveZ,
+                          !countdown && firstStep && jumpPending,
+                          latest.snapshot.ghostZones ?? [],
+                          latest.snapshot.safeRadius
+                        );
+                        if (firstStep) jumpPending = false;
+                        firstStep = false;
+                        const elapsedMs = step * 1000;
+                        remaining -= elapsedMs;
+                        cursor += elapsedMs;
+                      }
+                      cursor = until;
+                    };
+                    for (const entry of pendingInputs) {
+                      const eventTime = Math.max(replayStart, entry.sentAt);
+                      simulateUntil(Math.min(replayEnd, eventTime));
+                      if (!activeInput.jump && entry.input.jump) jumpPending = true;
+                      activeInput = entry.input;
+                    }
+                    simulateUntil(replayEnd);
+                    const correctionDecay = Math.exp(-12 * dt);
+                    localCorrectionRef.current.x *= correctionDecay;
+                    localCorrectionRef.current.y *= correctionDecay;
+                    localCorrectionRef.current.z *= correctionDecay;
+                    predicted.x += localCorrectionRef.current.x;
+                    predicted.y += localCorrectionRef.current.y;
+                    predicted.z += localCorrectionRef.current.z;
+                    lastPredictedLocalRef.current = { sequence: latest.sequence, x: predicted.x, y: predicted.y, z: predicted.z };
+                    player.x = predicted.x;
+                    player.y = predicted.y;
+                    player.z = predicted.z;
+                    player.vx = predicted.vx;
+                    player.vy = predicted.vy;
+                    player.vz = predicted.vz;
+                    player.rotationY = predicted.rotationY;
                   }
                 }
                 return player;
@@ -811,6 +993,7 @@ export function App() {
           {showDebug && snapshot && (
             <DebugOverlay
               snapshot={snapshot}
+              networkStats={isOnline ? networkStats : undefined}
               onClose={() => setShowDebug(false)}
             />
           )}
